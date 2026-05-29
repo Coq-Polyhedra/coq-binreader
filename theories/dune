@@ -3,4 +3,5 @@
 (coq.theory
  (name BinReader)
  (package coq-binreader)
- (libraries coq-binreader.plugin))
+ (theories Bignums)
+ (plugins coq-binreader.plugin))
