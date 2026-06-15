@@ -7,4 +7,4 @@
 
 (coq.theory
  (name BinReaderTest)
- (theories BinReader))
+ (theories BinReader Bignums))

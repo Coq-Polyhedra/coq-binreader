@@ -1,5 +1,32 @@
 (* -------------------------------------------------------------------- *)
-module Stream = Stdlib.Stream [@@warning "-3"]
+(* [Stream] was removed from the OCaml stdlib in 5.x. We only need a
+   minimal pull-based stream, so we provide it locally rather than depend
+   on (and dynlink) the [camlp-streams] package from a Coq plugin. *)
+module Stream : sig
+  type 'a t
+
+  exception Failure
+
+  val from : (int -> 'a option) -> 'a t
+
+  val next : 'a t -> 'a
+end = struct
+  type 'a t = {
+    f : int -> 'a option;
+    mutable count : int;
+  }
+
+  exception Failure
+
+  let from (f : int -> 'a option) : 'a t = { f; count = 0 }
+
+  let next (s : 'a t) : 'a =
+    match s.f s.count with
+    | None -> raise Failure
+    | Some x ->
+      s.count <- s.count + 1;
+      x
+end
 
 (* -------------------------------------------------------------------- *)
 let () = assert (Sys.int_size = 63)
@@ -118,10 +145,10 @@ end = struct
 
   let cS = Coqlib.lib_ref "num.nat.S"
 
-  let mk0 = Constr.mkRef (c0, Univ.Instance.empty)
+  let mk0 = Constr.mkRef (c0, UVars.Instance.empty)
 
   let mkS (arg : Constr.constr) =
-    Constr.mkApp (Constr.mkRef (cS, Univ.Instance.empty), [| arg |])
+    Constr.mkApp (Constr.mkRef (cS, UVars.Instance.empty), [| arg |])
 
 
   let nat_of_int : int -> Constr.t =
@@ -130,14 +157,14 @@ end = struct
 
 
   let bigN_of_reader =
-    let w0 = Constr.mkRef (Coqlib.lib_ref "num.double.w0", Univ.Instance.empty) in
-    let ww = Constr.mkRef (Coqlib.lib_ref "num.double.ww", Univ.Instance.empty) in
-    let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", Univ.Instance.empty) in
-    let double = Constr.mkRef (Coqlib.lib_ref "num.double.type", Univ.Instance.empty) in
+    let w0 = Constr.mkRef (Coqlib.lib_ref "num.double.w0", UVars.Instance.empty) in
+    let ww = Constr.mkRef (Coqlib.lib_ref "num.double.ww", UVars.Instance.empty) in
+    let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", UVars.Instance.empty) in
+    let double = Constr.mkRef (Coqlib.lib_ref "num.double.type", UVars.Instance.empty) in
     let ctors =
       Array.init (BigNums.N.inlined + 1) (fun i ->
         let ctor = BigNums.N.ctor i in
-        Constr.mkRef (Coqlib.lib_ref ctor, Univ.Instance.empty))
+        Constr.mkRef (Coqlib.lib_ref ctor, UVars.Instance.empty))
     in
 
     let rec mkword (n : int) =
@@ -185,8 +212,8 @@ end = struct
 
 
   let bigZ_of_reader =
-    let pos = Constr.mkRef (Coqlib.lib_ref "bignums.Z.pos", Univ.Instance.empty) in
-    let neg = Constr.mkRef (Coqlib.lib_ref "bignums.Z.neg", Univ.Instance.empty) in
+    let pos = Constr.mkRef (Coqlib.lib_ref "bignums.Z.pos", UVars.Instance.empty) in
+    let neg = Constr.mkRef (Coqlib.lib_ref "bignums.Z.neg", UVars.Instance.empty) in
 
     let doit (reader : reader) =
       let is_nneg = get_int63 reader <> 0 in
@@ -199,7 +226,7 @@ end = struct
 
 
   let bigQ_of_reader =
-    let q = Constr.mkRef (Coqlib.lib_ref "bignums.Q.q", Univ.Instance.empty) in
+    let q = Constr.mkRef (Coqlib.lib_ref "bignums.Q.q", UVars.Instance.empty) in
 
     let doit (reader : reader) =
       let num = bigZ_of_reader reader in
@@ -211,14 +238,14 @@ end = struct
 
 
   let of_descr_ty =
-    let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", Univ.Instance.empty) in
-    let bigN = Constr.mkRef (Coqlib.lib_ref "bignums.N.type", Univ.Instance.empty) in
-    let bigZ = Constr.mkRef (Coqlib.lib_ref "bignums.Z.type", Univ.Instance.empty) in
-    let bigQ = Constr.mkRef (Coqlib.lib_ref "bignums.Q.type", Univ.Instance.empty) in
-    let prod = Constr.mkRef (Coqlib.lib_ref "core.prod.type", Univ.Instance.empty) in
+    let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", UVars.Instance.empty) in
+    let bigN = Constr.mkRef (Coqlib.lib_ref "bignums.N.type", UVars.Instance.empty) in
+    let bigZ = Constr.mkRef (Coqlib.lib_ref "bignums.Z.type", UVars.Instance.empty) in
+    let bigQ = Constr.mkRef (Coqlib.lib_ref "bignums.Q.type", UVars.Instance.empty) in
+    let prod = Constr.mkRef (Coqlib.lib_ref "core.prod.type", UVars.Instance.empty) in
     let array =
       Constr.mkRef
-        (Coqlib.lib_ref "parray.type", Univ.Instance.of_array [| Univ.Level.set |])
+        (Coqlib.lib_ref "parray.type", UVars.Instance.of_array ([||], [| Univ.Level.set |]))
     in
 
     let rec doit (descr : descr) =
@@ -234,7 +261,7 @@ end = struct
 
 
   let of_descr (reader : reader) =
-    let pair = Constr.mkRef (Coqlib.lib_ref "core.prod.intro", Univ.Instance.empty) in
+    let pair = Constr.mkRef (Coqlib.lib_ref "core.prod.intro", UVars.Instance.empty) in
 
     let rec of_descr (descr : descr) : Constr.t =
       match descr with
@@ -262,7 +289,7 @@ end = struct
       let ty = of_descr_ty descr in
       let default = of_descr descr in
       let data = Array.init length (fun _ -> of_descr descr) in
-      let u = Univ.Instance.of_array [| Univ.Level.set |] in
+      let u = UVars.Instance.of_array ([||], [| Univ.Level.set |]) in
       Constr.mkArray (u, data, default, ty)
     in
 

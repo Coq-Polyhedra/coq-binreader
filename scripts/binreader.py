@@ -170,6 +170,11 @@ def descriptor_of_string(s : str) -> Descriptor:
 
 # --------------------------------------------------------------------
 def _main():
+    # Python >= 3.11 caps int<->str conversion at 4300 digits by default;
+    # the test data contains far larger integers, so lift the limit.
+    if hasattr(sys, 'set_int_max_str_digits'):
+        sys.set_int_max_str_digits(0)
+
     if len(sys.argv)-1 != 2:
         print(f'Usage: {os.path.basename(sys.argv[0])} [file.json] [file.bin]')
         exit(1)

@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      # Coq 8.20.1 with OCaml 4.14; coq-core and coq-bignums (9.0.0+coq8.20)
+      # are preinstalled in this image.
+      image: coqorg/coq:8.20.1-ocaml-4.14.2-flambda
+      options: --user root
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and test
+        run: |
+          # The image's toolchain lives in the 'coq' user's opam switch.
+          # Run the build as that user, with its opam environment loaded.
+          chown -R coq:coq .
+          su coq -c '
+            set -eu
+            eval "$(opam env)"
+            ocaml -version
+            coqc --version | head -n1
+            dune build @all
+            dune runtest
+          '

@@ -1,4 +1,4 @@
-DECLARE PLUGIN "binreader.plugin"
+DECLARE PLUGIN "coq-binreader.plugin"
 
 {
   open Stdarg
