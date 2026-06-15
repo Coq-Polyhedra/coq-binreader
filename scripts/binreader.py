@@ -108,6 +108,35 @@ class D_Pair(Descriptor):
         self._snd.descriptor(stream)
 
 # --------------------------------------------------------------------
+def _write_string(value : str, stream):
+    # A length (in bytes) word, then the raw UTF-8 bytes.
+    data = value.encode('utf-8')
+    assert(len(data) < (1 << 63))
+    D_Int63.INSTANCE.pickle(len(data), stream)
+    stream.write(data)
+
+# --------------------------------------------------------------------
+class D_Record(Descriptor):
+    def __init__(self, name : str, fields : list):
+        # fields : list of (field-name, Descriptor), in declaration order
+        self._name   = name
+        self._fields = fields
+
+    default = property(
+        lambda self : {fname : d.default for (fname, d) in self._fields})
+
+    def pickle(self, value, stream):
+        for (fname, d) in self._fields:
+            d.pickle(value[fname], stream)
+
+    def descriptor(self, stream):
+        stream.write(struct.pack('<Q', 0x06))
+        _write_string(self._name, stream)
+        D_Int63.INSTANCE.pickle(len(self._fields), stream)
+        for (_, d) in self._fields:
+            d.descriptor(stream)
+
+# --------------------------------------------------------------------
 class D_Array(Descriptor):
     def __init__(self, elem : Descriptor, default : any):
         self._elem    = elem
@@ -130,6 +159,16 @@ class D_Array(Descriptor):
 def descriptor_of_string(s : str) -> Descriptor:
     def invalid_input(i : int):
         return ValueError(f'input = {s}, position = {i}')
+
+    def ident(i : int, extra : str):
+        # read a maximal run of identifier characters (letters, digits, '_'
+        # and any of [extra]); return (text, new-position)
+        j = i
+        while j < len(s) and (s[j].isalnum() or s[j] == '_' or s[j] in extra):
+            j += 1
+        if j == i:
+            raise invalid_input(i)
+        return (s[i:j], j)
 
     def doit(i : int):
         if i == len(s):
@@ -163,6 +202,27 @@ def descriptor_of_string(s : str) -> Descriptor:
                 fst = elems.pop()
                 elems.append(D_Pair(fst, snd))
             return elems[0], i+1
+
+        if s[i] == '{':
+            # { Qualid | fname1 : d1 , fname2 : d2 , ... }
+            name, i = ident(i+1, '.')
+            if i == len(s) or s[i] != '|':
+                raise invalid_input(i)
+            i += 1
+            fields = []
+            while True:
+                fname, i = ident(i, '')
+                if i == len(s) or s[i] != ':':
+                    raise invalid_input(i)
+                fd, i = doit(i+1)
+                fields.append((fname, fd))
+                if i == len(s):
+                    raise invalid_input(i)
+                if s[i] == ',':
+                    i += 1; continue
+                if s[i] == '}':
+                    return (D_Record(name, fields), i+1)
+                raise invalid_input(i)
 
         raise invalid_input(i)
 

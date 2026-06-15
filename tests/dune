@@ -5,6 +5,11 @@
   (deps tests.json)
   (action (run ../scripts/binreader.py %{deps} %{target})))
 
+(rule
+  (target record.bin)
+  (deps record.json)
+  (action (run ../scripts/binreader.py %{deps} %{target})))
+
 (coq.theory
  (name BinReaderTest)
  (theories BinReader Bignums))

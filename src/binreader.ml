@@ -1,34 +1,4 @@
 (* -------------------------------------------------------------------- *)
-(* [Stream] was removed from the OCaml stdlib in 5.x. We only need a
-   minimal pull-based stream, so we provide it locally rather than depend
-   on (and dynlink) the [camlp-streams] package from a Coq plugin. *)
-module Stream : sig
-  type 'a t
-
-  exception Failure
-
-  val from : (int -> 'a option) -> 'a t
-
-  val next : 'a t -> 'a
-end = struct
-  type 'a t = {
-    f : int -> 'a option;
-    mutable count : int;
-  }
-
-  exception Failure
-
-  let from (f : int -> 'a option) : 'a t = { f; count = 0 }
-
-  let next (s : 'a t) : 'a =
-    match s.f s.count with
-    | None -> raise Failure
-    | Some x ->
-      s.count <- s.count + 1;
-      x
-end
-
-(* -------------------------------------------------------------------- *)
 let () = assert (Sys.int_size = 63)
 
 (* -------------------------------------------------------------------- *)
@@ -42,6 +12,7 @@ type descr =
   | BigQ
   | Pair of descr * descr
   | Array of descr
+  | Record of string * descr list  (* qualified name + field descriptors *)
 
 (* -------------------------------------------------------------------- *)
 module BigNums : sig
@@ -124,7 +95,7 @@ end
 
 (* -------------------------------------------------------------------- *)
 module Reader : sig
-  type reader = int Stream.t
+  type reader = in_channel
 
   val of_descr : reader -> descr -> Constr.t
 
@@ -132,11 +103,26 @@ module Reader : sig
 
   val of_reader : reader -> descr * Constr.t * Constr.types
 end = struct
-  type reader = int Stream.t
+  (* A sequence of little-endian 8-byte words, each fitting in a 63-bit int. *)
+  type reader = in_channel
 
-  let get_int63 (reader : reader) =
-    try Stream.next reader with
-    | Stream.Failure -> raise Malformed_data
+  let get_int63 (reader : reader) : int =
+    let buf = Bytes.create 8 in
+    try
+      Stdlib.really_input reader buf 0 8;
+      Int64.to_int (Bytes.get_int64_le buf 0)
+    with
+    | End_of_file -> raise Malformed_data
+
+
+  (* A length word, then that many raw bytes (read directly, not as words). *)
+  let get_string (reader : reader) : string =
+    let len = get_int63 reader in
+    if len < 0 then raise Malformed_data;
+    let buf = Bytes.create len in
+    (try Stdlib.really_input reader buf 0 len with
+     | End_of_file -> raise Malformed_data);
+    Bytes.to_string buf
 
 
   external fls : Uint63.t -> int = "fls_63"
@@ -237,6 +223,41 @@ end = struct
     fun reader -> doit reader
 
 
+  (* Resolve a record type's qualified name to its inductive and constructor
+     arity. Requires a single-constructor, non-parameterized, monomorphic
+     record. Memoized by name. *)
+  let ind_of_name : string -> Names.inductive * int =
+    let cache : (string, Names.inductive * int) Hashtbl.t = Hashtbl.create 17 in
+    fun (name : string) ->
+      match Hashtbl.find_opt cache name with
+      | Some res -> res
+      | None ->
+        let fail msg =
+          CErrors.user_err Pp.(str "binreader: " ++ str name ++ str ": " ++ str msg)
+        in
+        let gref =
+          try Nametab.locate (Libnames.qualid_of_string name) with
+          | Not_found -> fail "unknown reference"
+        in
+        let ind =
+          match gref with
+          | Names.GlobRef.IndRef ind -> ind
+          | _ -> fail "not an inductive type"
+        in
+        let mib, oib = Inductive.lookup_mind_specif (Global.env ()) ind in
+        if Array.length oib.Declarations.mind_consnames <> 1 then
+          fail "not a single-constructor record";
+        if mib.Declarations.mind_nparams <> 0 then
+          fail "parameterized records are not supported";
+        (match mib.Declarations.mind_universes with
+         | Declarations.Monomorphic -> ()
+         | Declarations.Polymorphic _ ->
+           fail "universe-polymorphic records are not supported");
+        let res = (ind, oib.Declarations.mind_consnrealargs.(0)) in
+        Hashtbl.add cache name res;
+        res
+
+
   let of_descr_ty =
     let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", UVars.Instance.empty) in
     let bigN = Constr.mkRef (Coqlib.lib_ref "bignums.N.type", UVars.Instance.empty) in
@@ -256,6 +277,9 @@ end = struct
       | BigQ -> bigQ
       | Pair (d1, d2) -> Constr.mkApp (prod, [| doit d1; doit d2 |])
       | Array d -> Constr.mkApp (array, [| doit d |])
+      | Record (name, _) ->
+        let ind, _ = ind_of_name name in
+        Constr.mkRef (Names.GlobRef.IndRef ind, UVars.Instance.empty)
     in
     fun descr -> doit descr
 
@@ -271,6 +295,7 @@ end = struct
       | BigQ -> of_bigQ ()
       | Pair (d1, d2) -> of_pair d1 d2
       | Array d -> of_array d
+      | Record (name, fields) -> of_record name fields
     and of_int63 () : Constr.t = Constr.mkInt (Uint63.of_int (get_int63 reader))
     and of_bigN () : Constr.t = bigN_of_reader reader
     and of_bigZ () : Constr.t = bigZ_of_reader reader
@@ -291,6 +316,23 @@ end = struct
       let data = Array.init length (fun _ -> of_descr descr) in
       let u = UVars.Instance.of_array ([||], [| Univ.Level.set |]) in
       Constr.mkArray (u, data, default, ty)
+    and of_record (name : string) (fields : descr list) : Constr.t =
+      let ind, arity = ind_of_name name in
+      if arity <> List.length fields then
+        CErrors.user_err
+          Pp.(str "binreader: " ++ str name ++ str ": expected "
+              ++ int arity ++ str " field(s), descriptor provides "
+              ++ int (List.length fields));
+      (* Decode fields left to right (the stream is read in order). *)
+      let rec read = function
+        | [] -> []
+        | d :: ds -> let v = of_descr d in v :: read ds
+      in
+      let args = Array.of_list (read fields) in
+      let ctor =
+        Constr.mkRef (Names.GlobRef.ConstructRef (ind, 1), UVars.Instance.empty)
+      in
+      Constr.mkApp (ctor, args)
     in
 
     fun descr -> of_descr descr
@@ -308,6 +350,13 @@ end = struct
         let d2 = doit () in
         Pair (d1, d2)
       | 0x05 -> Array (doit ())
+      | 0x06 ->
+        let name = get_string reader in
+        let nfields = get_int63 reader in
+        if nfields < 0 then raise Malformed_data;
+        (* Read the field descriptors in order. *)
+        let rec read n = if n <= 0 then [] else let d = doit () in d :: read (n - 1) in
+        Record (name, read nfields)
       | _ -> raise Malformed_data
     in
     doit ()
@@ -325,22 +374,7 @@ let load_data_from_file (filename : string) =
   let stream = open_in_bin filename in
 
   let aout =
-    let get_int63 =
-      let buffer = Bytes.create 8 in
-      let doit () =
-        try
-          Stdlib.really_input stream buffer 0 8;
-          Some (Int64.to_int (Bytes.get_int64_le buffer 0))
-        with
-        | End_of_file -> None
-      in
-      doit
-    in
-
-    try
-      let istream = Stream.from (fun _ -> get_int63 ()) in
-      Reader.of_reader istream
-    with
+    try Reader.of_reader stream with
     | e ->
       close_in stream;
       raise e
