@@ -1,0 +1,11 @@
+{
+  "descriptor": "({point|px:I,py:Z},[{point|px:I,py:Z}])",
+
+  "data": [
+    { "px": 7, "py": -3 },
+    [
+      { "px": 1, "py": 1 },
+      { "px": 2, "py": -2 }
+    ]
+  ]
+}
