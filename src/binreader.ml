@@ -39,7 +39,7 @@ end = struct
     Names.DirPath.make (List.rev_map Names.Id.of_string components)
 
 
-  let () =
+  let register_double () =
     let mp = [ "Coq"; "Numbers"; "Cyclic"; "Abstract"; "DoubleType" ] in
     let mp = Names.MPfile (make_dir mp) in
     let ty = Names.MutInd.make2 mp (Names.Label.make "zn2z"), 0 in
@@ -49,7 +49,7 @@ end = struct
     C.register_ref "num.double.ww" (Names.GlobRef.ConstructRef (ty, 2))
 
 
-  let () =
+  let register_bigN () =
     let mp = [ "Bignums"; "BigN"; "BigN" ] in
     let mp = Names.MPfile (make_dir mp) in
     let mp = Names.MPdot (mp, Names.Label.make "BigN") in
@@ -62,7 +62,7 @@ end = struct
     C.register_ref "bignums.N.type" (Names.GlobRef.ConstRef ty)
 
 
-  let () =
+  let register_bigZ () =
     let mp = [ "Bignums"; "BigZ"; "BigZ" ] in
     let mp = Names.MPfile (make_dir mp) in
     let mp = Names.MPdot (mp, Names.Label.make "BigZ") in
@@ -74,7 +74,7 @@ end = struct
     C.register_ref "bignums.Z.type" (Names.GlobRef.ConstRef ty)
 
 
-  let () =
+  let register_bigQ () =
     let mp = [ "Bignums"; "BigQ"; "BigQ" ] in
     let mp = Names.MPfile (make_dir mp) in
     let mp = Names.MPdot (mp, Names.Label.make "BigQ") in
@@ -86,11 +86,27 @@ end = struct
     C.register_ref "bignums.Q.type" (Names.GlobRef.ConstRef ty)
 
 
-  let () =
+  let register_array () =
     let mp = Names.MPfile (make_dir [ "Coq"; "Array"; "PArray" ]) in
     let ty = Names.Constant.make2 mp (Names.Label.make "array") in
 
     C.register_ref "parray.type" (Names.GlobRef.ConstRef ty)
+
+
+  let register () =
+    register_double ();
+    register_bigN ();
+    register_bigZ ();
+    register_bigQ ();
+    register_array ()
+
+
+  (* [Coqlib.register_ref] creates interpreter-stage library objects, while a
+     plugin is first dynlinked during the syntax stage.  Register the logical
+     references from the callback attached to [Declare ML Module], so its
+     recorded library objects are replayed correctly on import and
+     backtracking. *)
+  let () = Mltop.declare_cache_obj register "coq-binreader.plugin"
 end
 
 (* -------------------------------------------------------------------- *)
@@ -127,37 +143,61 @@ end = struct
 
   external fls : Uint63.t -> int = "fls_63"
 
-  let c0 = Coqlib.lib_ref "num.nat.O"
+  (* A plugin can be dynlinked before the [Require] commands stored in its
+     wrapper [.vo] have been replayed.  In particular, [num.int63.type] is
+     registered by [PrimInt63], not by Coq's initial environment.  Keep every
+     logical reference lazy so merely importing [BinReader] is independent of
+     which standard-library modules the client imported beforehand. *)
+  let c0 = lazy (Coqlib.lib_ref "num.nat.O")
 
-  let cS = Coqlib.lib_ref "num.nat.S"
+  let cS = lazy (Coqlib.lib_ref "num.nat.S")
 
-  let mk0 = Constr.mkRef (c0, UVars.Instance.empty)
+  let mk0 () = Constr.mkRef (Lazy.force c0, UVars.Instance.empty)
 
   let mkS (arg : Constr.constr) =
-    Constr.mkApp (Constr.mkRef (cS, UVars.Instance.empty), [| arg |])
+    Constr.mkApp
+      (Constr.mkRef (Lazy.force cS, UVars.Instance.empty), [| arg |])
 
 
   let nat_of_int : int -> Constr.t =
     let rec doit acc n = if n <= 0 then acc else doit (mkS acc) (n - 1) in
-    fun n -> doit mk0 n
+    fun n -> doit (mk0 ()) n
 
 
   let bigN_of_reader =
-    let w0 = Constr.mkRef (Coqlib.lib_ref "num.double.w0", UVars.Instance.empty) in
-    let ww = Constr.mkRef (Coqlib.lib_ref "num.double.ww", UVars.Instance.empty) in
-    let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", UVars.Instance.empty) in
-    let double = Constr.mkRef (Coqlib.lib_ref "num.double.type", UVars.Instance.empty) in
-    let ctors =
-      Array.init (BigNums.N.inlined + 1) (fun i ->
-        let ctor = BigNums.N.ctor i in
-        Constr.mkRef (Coqlib.lib_ref ctor, UVars.Instance.empty))
-    in
-
-    let rec mkword (n : int) =
-      if n <= 0 then int63 else Constr.mkApp (double, [| mkword (n - 1) |])
+    let terms =
+      lazy (
+        let w0 =
+          Constr.mkRef
+            (Coqlib.lib_ref "num.double.w0", UVars.Instance.empty)
+        in
+        let ww =
+          Constr.mkRef
+            (Coqlib.lib_ref "num.double.ww", UVars.Instance.empty)
+        in
+        let int63 =
+          Constr.mkRef
+            (Coqlib.lib_ref "num.int63.type", UVars.Instance.empty)
+        in
+        let double =
+          Constr.mkRef
+            (Coqlib.lib_ref "num.double.type", UVars.Instance.empty)
+        in
+        let ctors =
+          Array.init (BigNums.N.inlined + 1) (fun i ->
+            let ctor = BigNums.N.ctor i in
+            Constr.mkRef (Coqlib.lib_ref ctor, UVars.Instance.empty))
+        in
+        w0, ww, int63, double, ctors)
     in
 
     let doit (reader : reader) : Constr.t =
+      let w0, ww, int63, double, ctors = Lazy.force terms in
+      let rec mkword (n : int) =
+        if n <= 0
+        then int63
+        else Constr.mkApp (double, [| mkword (n - 1) |])
+      in
       let length = ref (get_int63 reader) in
       let height = if !length = 0 then 0 else fls (Uint63.of_int (!length - 1)) in
 
@@ -198,10 +238,19 @@ end = struct
 
 
   let bigZ_of_reader =
-    let pos = Constr.mkRef (Coqlib.lib_ref "bignums.Z.pos", UVars.Instance.empty) in
-    let neg = Constr.mkRef (Coqlib.lib_ref "bignums.Z.neg", UVars.Instance.empty) in
+    let terms =
+      lazy (
+        let pos =
+          Constr.mkRef (Coqlib.lib_ref "bignums.Z.pos", UVars.Instance.empty)
+        in
+        let neg =
+          Constr.mkRef (Coqlib.lib_ref "bignums.Z.neg", UVars.Instance.empty)
+        in
+        pos, neg)
+    in
 
     let doit (reader : reader) =
+      let pos, neg = Lazy.force terms in
       let is_nneg = get_int63 reader <> 0 in
       let bign = bigN_of_reader reader in
       let ctor = if is_nneg then pos else neg in
@@ -212,12 +261,15 @@ end = struct
 
 
   let bigQ_of_reader =
-    let q = Constr.mkRef (Coqlib.lib_ref "bignums.Q.q", UVars.Instance.empty) in
+    let q =
+      lazy (
+        Constr.mkRef (Coqlib.lib_ref "bignums.Q.q", UVars.Instance.empty))
+    in
 
     let doit (reader : reader) =
       let num = bigZ_of_reader reader in
       let den = bigN_of_reader reader in
-      Constr.mkApp (q, [| num; den |])
+      Constr.mkApp (Lazy.force q, [| num; den |])
     in
 
     fun reader -> doit reader
@@ -259,33 +311,47 @@ end = struct
 
 
   let of_descr_ty =
-    let int63 = Constr.mkRef (Coqlib.lib_ref "num.int63.type", UVars.Instance.empty) in
-    let bigN = Constr.mkRef (Coqlib.lib_ref "bignums.N.type", UVars.Instance.empty) in
-    let bigZ = Constr.mkRef (Coqlib.lib_ref "bignums.Z.type", UVars.Instance.empty) in
-    let bigQ = Constr.mkRef (Coqlib.lib_ref "bignums.Q.type", UVars.Instance.empty) in
-    let prod = Constr.mkRef (Coqlib.lib_ref "core.prod.type", UVars.Instance.empty) in
-    let array =
-      Constr.mkRef
-        (Coqlib.lib_ref "parray.type", UVars.Instance.of_array ([||], [| Univ.Level.set |]))
+    let terms =
+      lazy (
+        let mkref name =
+          Constr.mkRef (Coqlib.lib_ref name, UVars.Instance.empty)
+        in
+        let int63 = mkref "num.int63.type" in
+        let bigN = mkref "bignums.N.type" in
+        let bigZ = mkref "bignums.Z.type" in
+        let bigQ = mkref "bignums.Q.type" in
+        let prod = mkref "core.prod.type" in
+        let array =
+          Constr.mkRef
+            (Coqlib.lib_ref "parray.type",
+             UVars.Instance.of_array ([||], [| Univ.Level.set |]))
+        in
+        int63, bigN, bigZ, bigQ, prod, array)
     in
 
-    let rec doit (descr : descr) =
-      match descr with
-      | Int63 -> int63
-      | BigN -> bigN
-      | BigZ -> bigZ
-      | BigQ -> bigQ
-      | Pair (d1, d2) -> Constr.mkApp (prod, [| doit d1; doit d2 |])
-      | Array d -> Constr.mkApp (array, [| doit d |])
-      | Record (name, _) ->
-        let ind, _ = ind_of_name name in
-        Constr.mkRef (Names.GlobRef.IndRef ind, UVars.Instance.empty)
-    in
-    fun descr -> doit descr
+    fun descr ->
+      let int63, bigN, bigZ, bigQ, prod, array = Lazy.force terms in
+      let rec doit (descr : descr) =
+        match descr with
+        | Int63 -> int63
+        | BigN -> bigN
+        | BigZ -> bigZ
+        | BigQ -> bigQ
+        | Pair (d1, d2) -> Constr.mkApp (prod, [| doit d1; doit d2 |])
+        | Array d -> Constr.mkApp (array, [| doit d |])
+        | Record (name, _) ->
+          let ind, _ = ind_of_name name in
+          Constr.mkRef (Names.GlobRef.IndRef ind, UVars.Instance.empty)
+      in
+      doit descr
 
 
   let of_descr (reader : reader) =
-    let pair = Constr.mkRef (Coqlib.lib_ref "core.prod.intro", UVars.Instance.empty) in
+    let pair =
+      lazy (
+        Constr.mkRef
+          (Coqlib.lib_ref "core.prod.intro", UVars.Instance.empty))
+    in
 
     let rec of_descr (descr : descr) : Constr.t =
       match descr with
@@ -305,7 +371,7 @@ end = struct
       let v2 = of_descr descr2 in
       let t1 = of_descr_ty descr1 in
       let t2 = of_descr_ty descr2 in
-      Constr.mkApp (pair, [| t1; t2; v1; v2 |])
+      Constr.mkApp (Lazy.force pair, [| t1; t2; v1; v2 |])
     and of_array (descr : descr) : Constr.t =
       let length = get_int63 reader in
 
@@ -387,6 +453,77 @@ let load_data_from_file (filename : string) =
 let load_and_define_data_from_file (filename : string) (x : Names.Id.t) =
   let _, c, ty = load_data_from_file filename in
 
+  let (_ : Names.Constant.t) =
+    Declare.declare_constant
+      ~name:x
+      ~kind:Decls.(IsDefinition Definition)
+      (Declare.DefinitionEntry (Declare.definition_entry ~types:ty c))
+  in
+  ()
+
+(* -------------------------------------------------------------------- *)
+(* A packed payload keeps the file bytes in a handful of primitive string
+   literals.  It deliberately does not interpret the descriptor or payload:
+   a Gallina decoder can consume the bytes under [vm_compute] without making
+   every decoded scalar visible to the kernel. *)
+module PackedReader = struct
+  (* Use the largest word-aligned primitive string.  A cursor-based Gallina
+     decoder then crosses as few chunk boundaries as possible. *)
+  let chunk_size = Pstring.max_length_int land lnot 7
+
+  let terms =
+    lazy (
+      let array_instance =
+        UVars.Instance.of_array ([||], [| Univ.Level.set |])
+      in
+      let string_ty =
+        Constr.mkRef
+          (Coqlib.lib_ref "strings.pstring.type", UVars.Instance.empty)
+      in
+      let array_ty =
+        Constr.mkRef (Coqlib.lib_ref "parray.type", array_instance)
+      in
+      let ty = Constr.mkApp (array_ty, [| string_ty |]) in
+      let empty = Constr.mkString (Pstring.unsafe_of_string "") in
+      array_instance, string_ty, ty, empty)
+
+  let read_file (filename : string) : Constr.t * Constr.types =
+    let stream = open_in_bin filename in
+    let close_and_raise e =
+      close_in_noerr stream;
+      raise e
+    in
+    let chunks =
+      try
+        let length = in_channel_length stream in
+        let chunk_count =
+          if length = 0 then 0 else 1 + ((length - 1) / chunk_size)
+        in
+        let chunks =
+          Array.init chunk_count (fun chunk_index ->
+            let offset = chunk_index * chunk_size in
+            let length = min chunk_size (length - offset) in
+            really_input_string stream length)
+        in
+        close_in stream;
+        chunks
+      with e -> close_and_raise e
+    in
+    let array_instance, string_ty, ty, empty = Lazy.force terms in
+    let chunks =
+      Array.map
+        (fun chunk -> Constr.mkString (Pstring.unsafe_of_string chunk))
+        chunks
+    in
+    let term = Constr.mkArray (array_instance, chunks, empty, string_ty) in
+    term, ty
+end
+
+
+(* -------------------------------------------------------------------- *)
+let load_and_define_packed_data_from_file
+    (filename : string) (x : Names.Id.t) =
+  let c, ty = PackedReader.read_file filename in
   let (_ : Names.Constant.t) =
     Declare.declare_constant
       ~name:x

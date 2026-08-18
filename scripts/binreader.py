@@ -4,7 +4,6 @@
 import abc
 import fractions
 import json
-import math
 import os
 import struct
 import sys
@@ -43,7 +42,7 @@ class D_BigN(Descriptor):
 
     def pickle(self, value, stream):
         assert(value >= 0)
-        nlimbs = 0 if value == 0 else (math.floor(math.log2(value)) + 1)
+        nlimbs = value.bit_length()
         nlimbs = 0 if nlimbs == 0 else ((nlimbs-1) // 63 + 1)
         D_Int63.INSTANCE.pickle(nlimbs, stream)
         for _ in range(nlimbs):
@@ -226,7 +225,10 @@ def descriptor_of_string(s : str) -> Descriptor:
 
         raise invalid_input(i)
 
-    return doit(0)[0]
+    descriptor, position = doit(0)
+    if position != len(s):
+        raise invalid_input(position)
+    return descriptor
 
 # --------------------------------------------------------------------
 def _main():

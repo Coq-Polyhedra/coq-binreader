@@ -1,6 +1,7 @@
 (* -------------------------------------------------------------------- *)
 (* -------- *) Require Import PArray Uint63.
 From Bignums   Require Import BigN BigZ BigQ.
+From BinReaderTest Require Import DataReady.
 From BinReader Require Import BinReader.
 
 (* -------------------------------------------------------------------- *)

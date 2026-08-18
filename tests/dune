@@ -10,6 +10,79 @@
   (deps record.json)
   (action (run ../scripts/binreader.py %{deps} %{target})))
 
+(rule
+  (target bigq.bin)
+  (deps bigq.json)
+  (action (run ../scripts/binreader.py %{deps} %{target})))
+
+(rule
+ (target buffer-boundary.bin)
+ (deps make_buffer_boundary.py)
+ (action (run %{dep:make_buffer_boundary.py} %{target})))
+
+(rule
+ (targets
+  packed-int.bin
+  packed-n.bin
+  packed-z.bin
+  packed-q.bin
+  packed-pair.bin
+  packed-array.bin
+  packed-empty-array.bin
+  packed-n-boundaries.bin
+  packed-record.bin
+  packed-empty-record.bin
+  packed-array-too-large.bin
+  packed-array-truncated-max.bin
+  packed-bign-huge-count.bin)
+ (deps make_packed_schemas.py)
+ (action (run %{dep:make_packed_schemas.py} .)))
+
+(rule
+ (target encoder-test.ok)
+ (deps test_encoder.py ../scripts/binreader.py)
+ (action
+  (with-stdout-to %{target}
+   (run %{dep:test_encoder.py} %{dep:../scripts/binreader.py}))))
+
+; [coqdep] cannot see files consumed by the plugin's [LoadData] and
+; [LoadDataPacked] commands.  Generate an empty Coq module only after every
+; fixture exists; all loading tests import it to make the ordering explicit.
+(rule
+ (target DataReady.v)
+ (deps
+  DataReady.v.in
+  bigq.bin
+  buffer-boundary.bin
+  record.bin
+  tests.bin
+  packed-int.bin
+  packed-n.bin
+  packed-z.bin
+  packed-q.bin
+  packed-pair.bin
+  packed-array.bin
+  packed-empty-array.bin
+  packed-n-boundaries.bin
+  packed-record.bin
+  packed-empty-record.bin
+  packed-array-too-large.bin
+  packed-array-truncated-max.bin
+  packed-bign-huge-count.bin)
+ (action (copy %{dep:DataReady.v.in} %{target})))
+
 (coq.theory
  (name BinReaderTest)
  (theories BinReader Bignums))
+
+(alias
+ (name runtest)
+ (package coq-binreader)
+ (deps
+  encoder-test.ok
+  ColdImportTest.vo
+  PackedTest.vo
+  PackedRoundTripTest.vo
+  PackedSchemasTest.vo
+  ReaderTest.vo
+  RecordTest.vo))
